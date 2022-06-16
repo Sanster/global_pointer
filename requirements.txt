@@ -1,0 +1,4 @@
+rich
+typer
+transformers==4.18.0
+datasets==2.3.0
