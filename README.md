@@ -19,6 +19,7 @@ CLUENER 结果对比
 | Efficient GlobalPointer(w/o RoPE)                                                            | 79.57% || 101778068 |
 
 训练脚本：
+
 - 通过 `--global_pointer_head` 切换 `GlobalPointer` 和 `EfficientGlobalPointer`
 - 通过 `--rope` 切换要不要加旋转位置编码 `RoPE`
 
@@ -57,8 +58,14 @@ python3 main.py \
   --do_eval
 ```
 
-对测试脚本，测试结果保存为 json:
+跑测试脚本，测试结果保存为 json:
 
 ```bash
-python3 predict.py ./model/global_pointer.py gp_test.json
+python3 predict.py test ./model/global_pointer.py gp_test.json
+```
+
+直接输入 input 看预测结果
+
+```bash
+python3 predict.py predict ./model/global_pointer.py
 ```
