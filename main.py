@@ -47,6 +47,14 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
+    global_pointer_head: str = field(
+        default="GlobalPointer",
+        metadata={"help": "GlobalPointer or EfficientGlobalPointer"}
+    )
+    rope: bool = field(
+        default=True,
+        metadata={"help": "Whether or not to add SinusoidalPositionEmbedding"}
+    )
 
 
 @dataclass
@@ -97,6 +105,7 @@ class DataTrainingArguments:
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    assert model_args.global_pointer_head in ["GlobalPointer", "EfficientGlobalPointer"]
 
     # Setup logging
     logging.basicConfig(
@@ -147,6 +156,8 @@ def main():
         model_args.model_name_or_path,
         num_labels=num_labels,
     )
+    config.global_pointer_head = model_args.global_pointer_head
+    config.RoPE = model_args.rope
 
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=True)
 

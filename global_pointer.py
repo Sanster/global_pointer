@@ -39,13 +39,20 @@ class SinusoidalPositionEmbedding(nn.Module):
 
 
 def apply_rotary_position_embeddings(pos, qw, kw):
-    cos_pos = pos[..., None, 1::2].repeat(1, 1, 1, 2)
-    sin_pos = pos[..., None, ::2].repeat(1, 1, 1, 2)
-    qw2 = torch.stack([-qw[..., 1::2], qw[..., ::2]], 4)
+    ndim = qw.ndim
+
+    if ndim == 4:
+        cos_pos = pos[..., None, 1::2].repeat(1, 1, 1, 2)
+        sin_pos = pos[..., None, ::2].repeat(1, 1, 1, 2)
+    else:
+        cos_pos = pos[..., 1::2].repeat(1, 1, 2)
+        sin_pos = pos[..., ::2].repeat(1, 1, 2)
+
+    qw2 = torch.stack([-qw[..., 1::2], qw[..., ::2]], ndim)
     qw2 = torch.reshape(qw2, qw.shape)
     qw = qw * cos_pos + qw2 * sin_pos
 
-    kw2 = torch.stack([-kw[..., 1::2], kw[..., ::2]], 4)
+    kw2 = torch.stack([-kw[..., 1::2], kw[..., ::2]], ndim)
     kw2 = torch.reshape(kw2, kw.shape)
     kw = kw * cos_pos + kw2 * sin_pos
 
@@ -82,7 +89,6 @@ class GlobalPointer(nn.Module):
         self.head_size = head_size
         self.hidden_size = hidden_size
         self.RoPE = RoPE
-        # TODO: 2 的含义？
         self.dense = nn.Linear(hidden_size, heads * head_size * 2)
 
     def forward(self, inputs, mask=None):
@@ -105,6 +111,48 @@ class GlobalPointer(nn.Module):
         mask = torch.tril(torch.ones_like(logits), diagonal=-1)
         logits = logits - mask * INFINITY
         return logits / self.head_size ** 0.5
+
+
+class EfficientGlobalPointer(nn.Module):
+    """更加参数高效的GlobalPointer
+    参考：https://kexue.fm/archives/8877
+    """
+
+    def __init__(self, heads, head_size, hidden_size, RoPE=True):
+        super().__init__()
+        self.heads = heads
+        self.head_size = head_size
+        self.hidden_size = hidden_size
+        self.RoPE = RoPE
+
+        self.p_dense = nn.Linear(
+            in_features=hidden_size,
+            out_features=self.head_size * 2,
+        )
+        self.q_dense = nn.Linear(
+            in_features=self.head_size * 2,
+            out_features=self.heads * 2,
+        )
+
+    def forward(self, inputs, mask=None):
+        # 输入变换
+        inputs = self.p_dense(inputs)
+        qw, kw = inputs[..., ::2], inputs[..., 1::2]
+        # RoPE编码
+        if self.RoPE:
+            pos = SinusoidalPositionEmbedding(self.head_size, 'zero')(inputs)
+            qw, kw = apply_rotary_position_embeddings(pos, qw, kw)
+        # 计算内积
+        logits = torch.einsum('bmd,bnd->bmn', qw, kw) / self.head_size ** 0.5
+        bias = torch.einsum('bnh->bhn', self.q_dense(inputs)) / 2
+        logits = logits[:, None] + bias[:, ::2, None] + bias[:, 1::2, :, None]
+        # 排除padding
+        logits = sequence_masking(logits, mask, -INFINITY, 2)
+        logits = sequence_masking(logits, mask, -INFINITY, 3)
+        # 排除下三角
+        mask = torch.tril(torch.ones_like(logits), diagonal=-1)
+        logits = logits - mask * INFINITY
+        return logits
 
 
 def multilabel_categorical_crossentropy(y_true, y_pred):
@@ -153,7 +201,14 @@ class BertGPForTokenClassification(BertPreTrainedModel):
         )
         self.dropout = nn.Dropout(classifier_dropout)
 
-        self.classifier = GlobalPointer(config.num_labels, 64, config.hidden_size)
+        global_pointer_head = config.global_pointer_head
+        RoPE = config.RoPE
+
+        if global_pointer_head == "GlobalPointer":
+            self.classifier = GlobalPointer(config.num_labels, 64, config.hidden_size, RoPE=RoPE)
+        else:
+            self.classifier = EfficientGlobalPointer(config.num_labels, 64, config.hidden_size, RoPE=RoPE)
+
         self.post_init()
 
     def forward(
@@ -194,8 +249,6 @@ class BertGPForTokenClassification(BertPreTrainedModel):
         loss = None
         if labels is not None:
             loss = global_pointer_crossentropy(labels, logits)
-            # f1 = global_pointer_f1_score(labels, logits)
-            # logger.info(f"Train f1: {f1}")
 
         if not return_dict:
             output = (logits,) + outputs[2:]
